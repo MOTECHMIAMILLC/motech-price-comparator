@@ -899,7 +899,6 @@ st.markdown("---")
 categories=sorted(filtered["Categoria"].dropna().unique().tolist())
 tab_list=["🌐 Todos los Productos"]+categories
 tabs=st.tabs(tab_list)
-cols_display=["Descripcion"]+provs+["Stock","Ubicación / ETA"]
 
 def highlight_min_price(row):
     styles=[""]*len(row)
@@ -918,9 +917,25 @@ for tab,cat in zip(tabs,tab_list):
         if d.empty:
             st.warning("No hay productos disponibles en esta categoría.")
         else:
-            fmt={p:"${:,.2f}" for p in provs if p in d.columns}
-            fmt.update({"Min Precio":"${:,.2f}","Max Precio":"${:,.2f}","Stock":"{:,.0f}"})
-            st.dataframe(d[cols_display].style.apply(highlight_min_price,axis=1).format(fmt,na_rep="—"),use_container_width=True)
+            # Mostrar solamente los proveedores que tienen al menos un precio
+            # dentro del conjunto actualmente visible (búsqueda/filtros/categoría).
+            # Los datos completos siguen existiendo internamente; solo se ocultan
+            # las columnas 100% vacías para hacer la tabla más compacta.
+            provs_visibles=[
+                p for p in provs
+                if p in d.columns and d[p].notna().any()
+            ]
+            cols_display=["Descripcion"]+provs_visibles+["Stock","Ubicación / ETA"]
+
+            fmt={p:"${:,.2f}" for p in provs_visibles}
+            fmt.update({"Stock":"{:,.0f}"})
+            st.dataframe(
+                d[cols_display]
+                .style
+                .apply(highlight_min_price,axis=1)
+                .format(fmt,na_rep="—"),
+                use_container_width=True
+            )
 
 # Diagnostics: inferred/synthetic SKUs cannot always match across vendors.
 inferred=df_all[df_all["SKU_Fuente"].isin(["INFERRED","SYNTHETIC"])]
