@@ -20,7 +20,7 @@ st.set_page_config(
 # CONFIG / SCHEMA
 # ============================================================
 BASE_COLUMNS = [
-    "Proveedor", "SKU", "SKU_Fuente", "Descripcion", "Precio", "Stock",
+    "Proveedor", "SKU", "SKU_Fuente", "Descripcion", "Condicion", "Precio", "Stock",
     "Stock_Miami", "Stock_NY", "En_Transito", "MOQ", "ETA", "Ubicacion",
 ]
 
@@ -47,7 +47,8 @@ PROVIDER_CODES = {
     "SNK": "SNK",
     "SUNRISE": "SUN",
     "TECH SUPPLIER": "TEC",
-    "TRADING": "TRA",
+    "UNLIMITED": "UNL",
+    "203_TRADING": "203",
     "WORLDWIDE": "WWD",
 }
 
@@ -200,7 +201,7 @@ def empty_frame() -> pd.DataFrame:
 
 
 def make_row(provider, sku, desc, price, stock=None, stock_miami=None, stock_ny=None,
-             transit=None, moq=None, eta="", location="", sku_source="FILE") -> Optional[dict]:
+             transit=None, moq=None, eta="", location="", condition="", sku_source="FILE") -> Optional[dict]:
     p = clean_price(price)
     d = safe_text(desc)
     sku = safe_text(sku).upper()
@@ -213,6 +214,7 @@ def make_row(provider, sku, desc, price, stock=None, stock_miami=None, stock_ny=
         "SKU": sku,
         "SKU_Fuente": sku_source,
         "Descripcion": d,
+        "Condicion": safe_text(condition),
         "Precio": p,
         "Stock": clean_qty(stock),
         "Stock_Miami": clean_qty(stock_miami),
@@ -239,7 +241,7 @@ def finalize(rows: List[dict]) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").astype("Float64")
 
     text_cols = [
-        "Proveedor", "SKU", "SKU_Fuente", "Descripcion", "ETA", "Ubicacion"
+        "Proveedor", "SKU", "SKU_Fuente", "Descripcion", "Condicion", "ETA", "Ubicacion"
     ]
     for c in text_cols:
         df[c] = df[c].where(df[c].notna(), "").astype("string")
@@ -257,30 +259,96 @@ def finalize(rows: List[dict]) -> pd.DataFrame:
         df.loc[needs_stock, "Stock"] = summed.loc[needs_stock].to_numpy()
 
     df["SKU"] = df["SKU"].str.strip().str.upper()
-    df = df[(df["SKU"] != "") & df["Precio"].notna()]
+
+    # Global commercial filters:
+    # 1) BONDED inventory must never reach the comparator.
+    # 2) Only products with confirmed stock > 0 are shown. Unknown/missing stock is excluded.
+    bonded_text = (
+        df["SKU"].astype("string").fillna("") + " " +
+        df["Descripcion"].astype("string").fillna("") + " " +
+        df["Condicion"].astype("string").fillna("")
+    ).str.upper()
+    df = df[~bonded_text.str.contains("BONDED", regex=False, na=False)]
+    df = df[(df["SKU"] != "") & df["Precio"].notna() & df["Stock"].notna() & (df["Stock"] > 0)]
     return df[BASE_COLUMNS].drop_duplicates().reset_index(drop=True)
 
 
 # ============================================================
 # CATEGORY / SPEC EXTRACTION
 # ============================================================
-def clasificar_categoria(desc, sku):
-    text = (str(desc) + " " + str(sku)).upper()
-    gaming = ["PLAYSTATION", "PS5", "XBOX", "NINTENDO", "SWITCH", "ROG", "TUF", "LEGION", "NITRO",
-              "ALIENWARE", "PREDATOR", "OMEN", "VICTUS", "ZEPHYRUS", "CYBORG", "RAIDER", "KATANA",
-              "STEALTH", "STRIX", "SCAR", "LOQ", "GAMING"]
-    desktop = ["DESKTOP", "ALL IN ONE", "ALL-IN-ONE", "AIO", "THINKCENTRE", "ELITEDESK", "NUC", "SERVER", "TOWER", "WORKSTATION"]
-    laptop = ["MACBOOK", "LAPTOP", "NOTEBOOK", "CHROMEBOOK", "ASPIRE", "VIVOBOOK", "IDEAPAD", "LATITUDE",
-              "PAVILION", "THINKPAD", "ZENBOOK", "PROBOOK", "ELITEBOOK", "ZBOOK", "OMNIBOOK"]
-    if any(k in text for k in gaming): return "🎮 Gaming"
-    if any(k in text for k in desktop): return "🖥️ Desktops & PC"
-    if any(k in text for k in laptop): return "💻 Laptops"
-    if any(k in text for k in ["IPAD", "TABLET", " TAB "]): return "📱 Tablets"
-    if any(k in text for k in ["MONITOR", "DISPLAY", "144HZ", "165HZ", "180HZ"]): return "🖥️ Monitores"
-    if any(k in text for k in ["AIRPODS", "EARBUD", "HEADPHONE", "HEADSET", "SPEAKER", "MOUSE", "KEYBOARD", "CABLE", "PENCIL"]):
-        return "🎧 Accesorios & Audio"
-    return "📦 Otros / Varios"
+def clasificar_categoria(desc, sku, condition=""):
+    text = f"{safe_text(desc)} {safe_text(sku)} {safe_text(condition)}".upper()
 
+    # Refurbished has absolute priority regardless of product type.
+    refurb_keys = [
+        "REFURBISHED", "REFURB", "RENEWED", "RECERTIFIED",
+        "RECONDITIONED", "RECONDITION", "CERTIFIED REFURBISHED",
+    ]
+    if any(k in text for k in refurb_keys):
+        return "♻️ REFURBISHED"
+
+    gaming_keys = [
+        "PLAYSTATION", "PS5", "PS4", "XBOX", "NINTENDO", "SWITCH", "JOY-CON", "JOYCON",
+        "ROG ALLY", "LEGION GO", "STEAM DECK", "META QUEST", "OCULUS",
+        "ALIENWARE", "PREDATOR", "OMEN", "VICTUS", "ZEPHYRUS", "CYBORG", "RAIDER",
+        "KATANA", "STRIX", "SCAR", "ROG ", " TUF ", "NITRO", "LOQ",
+        "GAMING LAPTOP", "GAMING DESKTOP", "GAMING PC", "GAMING HEADSET",
+        "GAMING MOUSE", "GAMING KEYBOARD", "LOGITECH G", "HYPERX", "ASTRO",
+    ]
+    if any(k in text for k in gaming_keys):
+        return "🎮 Gaming"
+
+    desktop_keys = [
+        "DESKTOP", "ALL IN ONE", "ALL-IN-ONE", " AIO ", "THINKCENTRE", "THINKCENTER",
+        "OPTIPLEX", "PRODESK", "ELITEDESK", "THINKSTATION", "MINI PC", "MINI DESKTOP",
+        "MICRO PC", "SFF", "SMALL FORM FACTOR", "TOWER", "WORKSTATION", "SERVER", "NUC",
+        "PRECISION TOWER", "PRECISION WORKSTATION", "HP Z2", "HP Z4", "HP Z6", "HP Z8",
+    ]
+    if any(k in text for k in desktop_keys):
+        return "🖥️ Desktops & PC"
+
+    laptop_keys = [
+        "MACBOOK", "LAPTOP", "NOTEBOOK", "CHROMEBOOK", "ASPIRE", "VIVOBOOK", "ZENBOOK",
+        "EXPERTBOOK", "IDEAPAD", "THINKPAD", "LATITUDE", "INSPIRON", "VOSTRO",
+        "PROBOOK", "ELITEBOOK", "ZBOOK", "PAVILION", "ENVY", "SPECTRE", "OMNIBOOK",
+        "SURFACE LAPTOP", "LG GRAM", "YOGA", "SWIFT", "TRAVELMATE", "DELL PRO ",
+    ]
+    if any(k in text for k in laptop_keys):
+        return "💻 Laptops"
+
+    # Multimedia is intentionally separate from generic accessories.
+    multimedia_keys = [
+        "SPEAKER", "SPEAKERS", "BLUETOOTH SPEAKER", "SOUNDBAR", "SOUND BAR",
+        "HEADPHONE", "HEADPHONES", "EARBUD", "EARBUDS", "AIRPODS", "BEATS",
+        "WIRELESS EARBUD", "TRUE WIRELESS", "TWS", "ECHO DOT", "ECHO SHOW", "ALEXA",
+        "FIRE TV", "FIRE STICK", "TV STICK", "CHROMECAST", "ROKU", "APPLE TV",
+        "STREAMING DEVICE", "MEDIA PLAYER", "SMART TV BOX",
+    ]
+    if any(k in text for k in multimedia_keys):
+        return "🎵 Multimedia"
+
+    if any(k in text for k in ["IPAD", "TABLET", " TAB ", "GALAXY TAB", "SURFACE PRO"]):
+        return "📱 Tablets"
+
+    if any(k in text for k in ["MONITOR", "DISPLAY", "144HZ", "165HZ", "180HZ", "240HZ"]):
+        return "🖥️ Monitores"
+
+    accessory_keys = [
+        "MOUSE", "KEYBOARD", "CABLE", "PENCIL", "STYLUS", "CASE", "COVER", "DOCK",
+        "DOCKING", "ADAPTER", "ADAPTOR", "CHARGER", "POWER SUPPLY", "WEBCAM",
+        "USB HUB", "HUB ", "BACKPACK", "SLEEVE",
+    ]
+    if any(k in text for k in accessory_keys):
+        return "🎧 Accesorios"
+
+    # Specification fallback for laptop descriptions without a known family name.
+    has_cpu = bool(re.search(r"\b(?:CORE\s+(?:ULTRA\s+)?[3579]|I[3579][-\s]|RYZEN(?:\s+AI)?\s+[3579]|SNAPDRAGON\s+X|CELERON|PENTIUM)\b", text))
+    has_screen = bool(re.search(r'\b1[1-7](?:\.\d)?\s*(?:INCH|IN|"|″)?\b', text))
+    has_memory = bool(re.search(r"\b(?:4|8|12|16|24|32|48|64)\s*GB\b", text))
+    if has_cpu and has_screen and has_memory:
+        return "💻 Laptops"
+
+    return "📦 Otros / Varios"
 
 def extraer_especificaciones(text):
     t = str(text).upper()
@@ -342,7 +410,8 @@ def detect_provider(filename: str) -> str:
     if "SNK" in n: return "SNK"
     if "SUNRISE" in n or re.search(r"\bSUN\b", n): return "SUNRISE"
     if "TECH SUPPLIER" in n: return "TECH SUPPLIER"
-    if "TRADING" in n: return "TRADING"
+    if "203_TRADING" in n or "203 TRADING" in n: return "203_TRADING"
+    if "TRADING" in n: return "UNLIMITED"
     if "WORLDWIDE" in n: return "WORLDWIDE"
     return re.sub(r"\(\d+\)$", "", n).strip()
 
@@ -548,7 +617,7 @@ def parse_tech(xls):
     return finalize(grouped)
 
 
-def parse_trading(xls):
+def parse_unlimited(xls):
     rows=[]
     for sheet in xls.sheet_names:
         raw=pd.read_excel(xls,sheet_name=sheet,header=None)
@@ -569,7 +638,7 @@ def parse_trading(xls):
             sku=safe_text(r[c_sku]) if c_sku else ""
             desc=safe_text(r[c_desc]) if c_desc else ""
             if not sku and desc:
-                sku,source=infer_sku_from_description(desc,"TRADING")
+                sku,source=infer_sku_from_description(desc,"UNLIMITED")
             else:
                 source="FILE"
             price=r[c_price]
@@ -579,8 +648,47 @@ def parse_trading(xls):
                 price=r[regular] if regular else price
             stock=r[c_qty] if c_qty else None
             # Availability like NOW is not numeric; leave stock unknown.
-            row=make_row("TRADING",sku,desc,price,stock=stock,location=sheet.strip(),sku_source=source)
+            row=make_row("UNLIMITED",sku,desc,price,stock=stock,location=sheet.strip(),sku_source=source)
             if row: rows.append(row)
+    return finalize(rows)
+
+
+def parse_203_trading(xls):
+    """203 Trading consolidated inventory from the 'Inventory Search' sheet."""
+    sheet = "Inventory Search" if "Inventory Search" in xls.sheet_names else xls.sheet_names[0]
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+    h = None
+    for i in range(min(20, len(raw))):
+        vals = [_norm_col(v) for v in raw.iloc[i].tolist() if pd.notna(v)]
+        if "VENDOR PN" in vals and "PRICE" in vals and any(v in vals for v in ["QTY.", "QTY", "QUANTITY"]):
+            h = i
+            break
+    if h is None:
+        return empty_frame()
+
+    df = pd.read_excel(xls, sheet_name=sheet, header=h)
+    c_sku = first_col(df, ["VENDOR PN", "SKU", "MPN", "PART NUMBER"])
+    c_desc = first_col(df, ["DESCRIPTION", "PRODUCT DESCRIPTION"])
+    c_condition = first_col(df, ["CONDITION"])
+    c_qty = first_col(df, ["QTY.", "QTY", "QUANTITY"])
+    c_price = first_col(df, ["PRICE", "COST"])
+    c_form = first_col(df, ["FORM FACTOR", "CATEGORY"])
+
+    rows = []
+    if c_price is None:
+        return empty_frame()
+    for _, r in df.iterrows():
+        sku = safe_text(r[c_sku]) if c_sku else ""
+        desc = safe_text(r[c_desc]) if c_desc else sku
+        condition = safe_text(r[c_condition]) if c_condition else ""
+        form = safe_text(r[c_form]) if c_form else ""
+        row = make_row(
+            "203_TRADING", sku, desc, r[c_price],
+            stock=(r[c_qty] if c_qty else None),
+            location=form, condition=condition, sku_source="FILE"
+        )
+        if row:
+            rows.append(row)
     return finalize(rows)
 
 
@@ -637,7 +745,8 @@ PARSERS = {
     "SNK": parse_snk,
     "SUNRISE": parse_sunrise,
     "TECH SUPPLIER": parse_tech,
-    "TRADING": parse_trading,
+    "UNLIMITED": parse_unlimited,
+    "203_TRADING": parse_203_trading,
     "WORLDWIDE": parse_worldwide,
 }
 
@@ -709,7 +818,7 @@ if not frames:
 df_all=pd.concat(frames,ignore_index=True)
 
 # Enrich after normalization so every provider uses the same logic.
-df_all["Categoria"]=df_all.apply(lambda r:clasificar_categoria(r["Descripcion"],r["SKU"]),axis=1)
+df_all["Categoria"]=df_all.apply(lambda r:clasificar_categoria(r["Descripcion"],r["SKU"],r.get("Condicion","")),axis=1)
 specs=df_all.apply(lambda r:extraer_especificaciones(f'{r["Descripcion"]} {r["SKU"]}'),axis=1)
 specs.columns=["Procesador","RAM","Disco_SSD","Pantalla"]
 df_all[["Procesador","RAM","Disco_SSD","Pantalla"]]=specs
@@ -736,25 +845,15 @@ pivot_p["Proveedor Menor Precio"]=pivot_p[provs].idxmin(axis=1)
 pivot_p["Ahorro Val"]=pivot_p["Max Precio"]-pivot_p["Min Precio"]
 pivot_p["Es Deal"]=(pivot_p[provs].notna().sum(axis=1)>=2)&(pivot_p["Ahorro Val"]>0)
 
-# Attach stock/location from cheapest provider and highest-stock provider.
-stock_cheapest=[]; loc_cheapest=[]; high_stock=[]; high_stock_provider=[]
+# Attach stock/location from the provider that has the lowest price.
+stock_cheapest=[]; loc_cheapest=[]
 for sku,row in pivot_p.iterrows():
     winner=row["Proveedor Menor Precio"]
     sub=df_all[(df_all["SKU"]==sku)&(df_all["Proveedor"]==winner)].sort_values("Stock",ascending=False,na_position="last")
     stock_cheapest.append(sub.iloc[0]["Stock"] if not sub.empty else None)
     loc_cheapest.append(sub.iloc[0]["Ubicacion"] if not sub.empty else "")
-    allsku=df_all[df_all["SKU"]==sku].copy()
-    if not allsku.empty and allsku["Stock"].notna().any():
-        ix=allsku["Stock"].fillna(-1).idxmax()
-        high_stock.append(allsku.loc[ix,"Stock"])
-        high_stock_provider.append(allsku.loc[ix,"Proveedor"])
-    else:
-        high_stock.append(None); high_stock_provider.append("")
-pivot_p["Stock (Menor Precio)"]=stock_cheapest
 pivot_p["Stock"]=stock_cheapest
 pivot_p["Ubicación / ETA"]=loc_cheapest
-pivot_p["Mayor Stock"]=high_stock
-pivot_p["Proveedor Mayor Stock"]=high_stock_provider
 
 # Sidebar filters
 st.sidebar.markdown("---")
