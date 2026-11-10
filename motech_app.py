@@ -5,6 +5,7 @@ import html
 import hashlib
 import datetime
 from typing import Optional, List, Dict, Tuple
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -60,12 +61,30 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    .main-header {font-size: 27px; font-weight: 800; color:#1B365D; margin-bottom:2px;}
-    .sub-header {font-size:14px; color:#555; margin-bottom:15px;}
-    .welcome-card {background:linear-gradient(135deg,#1B365D 0%,#2E7D32 100%);color:white;
-        padding:16px 20px;border-radius:10px;margin-bottom:20px;box-shadow:0 4px 6px rgba(0,0,0,.1);}
-    .welcome-title {font-size:20px;font-weight:700;margin-bottom:4px;}
-    .quote-text {font-size:14px;font-style:italic;opacity:.95;}
+
+    /* Compacta el espacio superior general */
+    .block-container {padding-top: 1.2rem; padding-bottom: 1.5rem;}
+
+    .main-header {font-size:24px;font-weight:800;color:#1B365D;margin:0 0 1px 0;line-height:1.15;}
+    .sub-header {font-size:13px;color:#666;margin:0;line-height:1.25;}
+    .compact-quote {font-size:12.5px;color:#52606D;font-style:italic;margin-top:5px;line-height:1.25;}
+
+    .kpi-strip {
+        display:grid;
+        grid-template-columns:repeat(4,minmax(0,1fr));
+        gap:8px;
+        margin:8px 0 8px 0;
+    }
+    .kpi-box {
+        border:1px solid #E2E8F0;
+        background:#FFFFFF;
+        border-radius:8px;
+        padding:7px 10px;
+        min-width:0;
+    }
+    .kpi-value {font-size:20px;font-weight:800;color:#1B365D;line-height:1.05;}
+    .kpi-label {font-size:11px;color:#667085;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
     .card-deal {background-color:#E8F5E9;border-left:6px solid #2E7D32;padding:12px 16px;
         border-radius:8px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,.08);}
     .card-title {font-size:15px;font-weight:700;color:#1B5E20;margin-bottom:4px;}
@@ -73,6 +92,13 @@ st.markdown("""
         font-size:12px;margin-right:6px;border:1px solid #CBD5E0;display:inline-block;margin-top:4px;}
     .badge-savings {background-color:#C8E6C9;color:#1B5E20;font-weight:700;padding:3px 8px;
         border-radius:4px;font-size:12px;float:right;}
+
+    div[data-testid="stExpander"] {margin-bottom:6px;}
+
+    @media (max-width: 800px) {
+        .kpi-strip {grid-template-columns:repeat(2,minmax(0,1fr));}
+        .main-header {font-size:20px;}
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -780,17 +806,29 @@ def parse_uploaded(uploaded) -> Tuple[pd.DataFrame, dict]:
 # ============================================================
 # APP
 # ============================================================
-logo_file="logo.png"
-col_logo,col_title=st.columns([1,5])
-with col_logo:
-    if os.path.exists(logo_file): st.image(logo_file,width=130)
-with col_title:
-    st.markdown('<div class="main-header">Motech Miami — Comparador Multiproveedor de Precios</div>',unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Compara precios, stock, tránsito y disponibilidad entre distribuidores.</div>',unsafe_allow_html=True)
+# Encabezado compacto con logo robusto (ruta relativa al propio script).
+app_dir = Path(__file__).resolve().parent
+logo_candidates = [
+    app_dir / "logo.png",
+    app_dir / "Logo.png",
+    Path.cwd() / "logo.png",
+]
+logo_path = next((p for p in logo_candidates if p.exists()), None)
 
 day_index=datetime.datetime.now().day % len(MOTIVATIONAL_QUOTES)
-st.markdown(f'''<div class="welcome-card"><div class="welcome-title">¡Hola! Bienvenido de nuevo 👋</div>
-<div class="quote-text">{MOTIVATIONAL_QUOTES[day_index]}</div></div>''',unsafe_allow_html=True)
+
+if logo_path:
+    col_logo,col_title=st.columns([0.65,5.35],vertical_alignment="center")
+    with col_logo:
+        st.image(str(logo_path),width=82)
+    with col_title:
+        st.markdown('<div class="main-header">Motech Miami — Comparador Multiproveedor de Precios</div>',unsafe_allow_html=True)
+        st.markdown('<div class="sub-header">Compara precios, stock, tránsito y disponibilidad entre distribuidores.</div>',unsafe_allow_html=True)
+        st.markdown(f'<div class="compact-quote">{MOTIVATIONAL_QUOTES[day_index]}</div>',unsafe_allow_html=True)
+else:
+    st.markdown('<div class="main-header">Motech Miami — Comparador Multiproveedor de Precios</div>',unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Compara precios, stock, tránsito y disponibilidad entre distribuidores.</div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="compact-quote">{MOTIVATIONAL_QUOTES[day_index]}</div>',unsafe_allow_html=True)
 
 uploaded_files=st.sidebar.file_uploader(
     "Cargar listas de proveedores (.xlsx / .xls):",
@@ -808,10 +846,10 @@ for f in uploaded_files:
     if not d.empty: frames.append(d)
 
 log_df=pd.DataFrame(import_log)
-with st.expander("📥 Resultado de importación",expanded=True):
-    st.dataframe(log_df,use_container_width=True,hide_index=True)
 
 if not frames:
+    with st.expander("📊 Detalle de importación",expanded=False):
+        st.dataframe(log_df,use_container_width=True,hide_index=True)
     st.error("No se pudieron extraer productos válidos de las listas cargadas.")
     st.stop()
 
@@ -823,12 +861,24 @@ specs=df_all.apply(lambda r:extraer_especificaciones(f'{r["Descripcion"]} {r["SK
 specs.columns=["Procesador","RAM","Disco_SSD","Pantalla"]
 df_all[["Procesador","RAM","Disco_SSD","Pantalla"]]=specs
 
-# KPIs
-k1,k2,k3,k4=st.columns(4)
-k1.metric("Filas importadas",f"{len(df_all):,}")
-k2.metric("Proveedores",df_all["Proveedor"].nunique())
-k3.metric("SKUs únicos",df_all["SKU"].nunique())
-k4.metric("Con stock > 0",f"{int((df_all['Stock'].fillna(0)>0).sum()):,}")
+# KPIs compactos. Los cálculos son exactamente los mismos que antes.
+rows_count = len(df_all)
+provider_count = df_all["Proveedor"].nunique()
+sku_count = df_all["SKU"].nunique()
+stock_count = int((df_all["Stock"].fillna(0)>0).sum())
+
+st.markdown(f'''
+<div class="kpi-strip">
+    <div class="kpi-box"><div class="kpi-value">{rows_count:,}</div><div class="kpi-label">Filas importadas</div></div>
+    <div class="kpi-box"><div class="kpi-value">{provider_count:,}</div><div class="kpi-label">Proveedores</div></div>
+    <div class="kpi-box"><div class="kpi-value">{sku_count:,}</div><div class="kpi-label">SKUs únicos</div></div>
+    <div class="kpi-box"><div class="kpi-value">{stock_count:,}</div><div class="kpi-label">Con stock &gt; 0</div></div>
+</div>
+''',unsafe_allow_html=True)
+
+# El detalle queda disponible, pero cerrado para ahorrar espacio vertical.
+with st.expander("📊 Detalle de importación",expanded=False):
+    st.dataframe(log_df,use_container_width=True,hide_index=True)
 
 # Price matrix
 pivot_p=df_all.pivot_table(index="SKU",columns="Proveedor",values="Precio",aggfunc="min")
