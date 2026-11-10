@@ -751,6 +751,7 @@ for sku,row in pivot_p.iterrows():
     else:
         high_stock.append(None); high_stock_provider.append("")
 pivot_p["Stock (Menor Precio)"]=stock_cheapest
+pivot_p["Stock"]=stock_cheapest
 pivot_p["Ubicación / ETA"]=loc_cheapest
 pivot_p["Mayor Stock"]=high_stock
 pivot_p["Proveedor Mayor Stock"]=high_stock_provider
@@ -799,7 +800,7 @@ st.markdown("---")
 categories=sorted(filtered["Categoria"].dropna().unique().tolist())
 tab_list=["🌐 Todos los Productos"]+categories
 tabs=st.tabs(tab_list)
-cols_display=["Descripcion"]+provs+["Proveedor Menor Precio","Stock (Menor Precio)","Proveedor Mayor Stock","Mayor Stock","Ubicación / ETA"]
+cols_display=["Descripcion"]+provs+["Stock","Ubicación / ETA"]
 
 def highlight_min_price(row):
     styles=[""]*len(row)
@@ -819,7 +820,7 @@ for tab,cat in zip(tabs,tab_list):
             st.warning("No hay productos disponibles en esta categoría.")
         else:
             fmt={p:"${:,.2f}" for p in provs if p in d.columns}
-            fmt.update({"Min Precio":"${:,.2f}","Max Precio":"${:,.2f}"})
+            fmt.update({"Min Precio":"${:,.2f}","Max Precio":"${:,.2f}","Stock":"{:,.0f}"})
             st.dataframe(d[cols_display].style.apply(highlight_min_price,axis=1).format(fmt,na_rep="—"),use_container_width=True)
 
 # Diagnostics: inferred/synthetic SKUs cannot always match across vendors.
