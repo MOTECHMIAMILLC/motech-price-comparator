@@ -420,7 +420,38 @@ def extraer_especificaciones(text):
 # ============================================================
 # PROVIDER DETECTION
 # ============================================================
-def detect_provider(filename: str) -> str:
+def _probe_workbook(xls, max_sheets=10, max_rows=20):
+    """Read a small sample of the workbook and build a structural fingerprint."""
+    probes = []
+    sheet_names = [_norm_col(s) for s in xls.sheet_names]
+    for sheet in xls.sheet_names[:max_sheets]:
+        try:
+            raw = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=max_rows)
+        except Exception:
+            continue
+        rows = []
+        flat = []
+        for _, r in raw.iterrows():
+            vals = [_norm_col(v) for v in r.tolist() if pd.notna(v) and str(v).strip()]
+            if vals:
+                rows.append(set(vals))
+                flat.extend(vals)
+        probes.append({"sheet": _norm_col(sheet), "rows": rows, "flat": flat})
+    all_text = " | ".join(sheet_names + [v for p in probes for v in p["flat"]])
+    return sheet_names, probes, all_text
+
+
+def _row_has(probes, required):
+    req = {_norm_col(x) for x in required}
+    return any(req.issubset(row) for p in probes for row in p["rows"])
+
+
+def _has_text(all_text, *parts):
+    return all(_norm_col(p) in all_text for p in parts)
+
+
+def _filename_fallback(filename: str) -> str:
+    """Legacy filename hints used only when the workbook fingerprint is inconclusive."""
     n = os.path.splitext(filename)[0].upper()
     if "HAIFA" in n: return "HAIFA"
     if "ALL PLUS" in n: return "ALL PLUS"
@@ -430,7 +461,7 @@ def detect_provider(filename: str) -> str:
     if re.search(r"\bASE\b", n): return "ASE"
     if "CELLU" in n: return "CELLUTECH"
     if "EMOLO" in n: return "EMOLO"
-    if "H&Z" in n or "H Z" in n: return "H&Z"
+    if any(k in n for k in ["H&Z", "H Z", "HYZ"]): return "H&Z"
     if "INFLUENTIAL" in n: return "INFLUENTIAL"
     if "PRT" in n: return "PRT"
     if "SNK" in n: return "SNK"
@@ -440,6 +471,111 @@ def detect_provider(filename: str) -> str:
     if "TRADING" in n: return "UNLIMITED"
     if "WORLDWIDE" in n: return "WORLDWIDE"
     return re.sub(r"\(\d+\)$", "", n).strip()
+
+
+def detect_provider(xls, filename: str) -> Tuple[str, str]:
+    """
+    Detect provider primarily from workbook structure.
+    Returns (provider, detection_method). Filename is only a fallback.
+    """
+    sheets, probes, text = _probe_workbook(xls)
+    sheet_set = set(sheets)
+
+    # H&Z — very stable workbook structure, independent of filename.
+    if (
+        "H&Z OFFERS" in sheet_set
+        or _row_has(probes, ["BRAND", "SKU", "MODEL NUMBER", "DESCRIPTION", "QTY", "PRICE (USD)", "MOQ", "CONDITION", "EXW", "ETA"])
+    ):
+        return "H&Z", "estructura"
+
+    # 203 Trading.
+    if (
+        "INVENTORY SEARCH" in sheet_set
+        and (_has_text(text, "203 TRADING LLC") or _row_has(probes, ["VENDOR PN", "FORM FACTOR", "MFR.", "DESCRIPTION", "CONDITION", "QTY.", "PRICE"]))
+    ):
+        return "203_TRADING", "estructura"
+
+    # Trading Unlimited (renamed UNLIMITED in the comparator).
+    if (
+        "TRADING UNLIMITED - PRICE LIST" in sheet_set
+        or ("HOUSE OF MARLEY" in sheet_set and "MOVA" in sheet_set)
+    ):
+        return "UNLIMITED", "estructura"
+
+    # SUNRISE.
+    if (
+        "PRICE LIST" in sheet_set and "PURCHASE ORDER" in sheet_set
+        and _has_text(text, "CASH", "TAKE ALL")
+    ):
+        return "SUNRISE", "estructura"
+
+    # SNK.
+    if (
+        "MIAMI" in sheet_set and any(s.startswith("NY STOCK") for s in sheets)
+        and _row_has(probes, ["MODEL", "UPC"])
+        and _has_text(text, "PRICE (USD$)")
+    ):
+        return "SNK", "estructura"
+
+    # HAIFA.
+    if (
+        any(s.strip() == "FULL LIST" for s in sheets)
+        and ("HAIFAWHOLESALE.COM" in text or "HAIFA WHOLESALE" in text)
+    ):
+        return "HAIFA", "estructura"
+
+    # CELLUTECH legacy workbook.
+    if ({"TABLETS", "HP POLY", "STEEL SERIES"}.issubset(sheet_set) or "DUBAI LAPTOPS" in sheet_set):
+        return "CELLUTECH", "estructura"
+
+    # ASE.
+    if (
+        "ASE" in sheet_set
+        and _row_has(probes, ["LOC", "MODEL", "DESCRIPTION", "PRICE", "IN STOCK", "IN TRANSIT"])
+    ):
+        return "ASE", "estructura"
+
+    # TECH SUPPLIER.
+    if _row_has(probes, ["BRAND", "PRODUCT LINE", "ITEM NUMBER", "ITEM DESCRIPTION", "LOCATION", "QUANTITY", "PRICE", "UPC"]):
+        return "TECH SUPPLIER", "estructura"
+
+    # INFLUENTIAL.
+    if _row_has(probes, ["CATEGORY", "BRAND", "QTY", "DESCRIPTION", "MPN", "SKU", "UPC", "COLOR", "PRICE"]):
+        return "INFLUENTIAL", "estructura"
+
+    # EMOLO.
+    if _row_has(probes, ["BRAND", "DESCRIPTION", "MODEL", "UPC", "QTY", "PRICE"]):
+        return "EMOLO", "estructura"
+
+    # PRT.
+    if _row_has(probes, ["PART NUMBER", "UPC", "DESCRIPTION", "QTY", "PRICE"]):
+        return "PRT", "estructura"
+
+    # WORLDWIDE.
+    if _row_has(probes, ["REMARK", "DESCRIPTION", "QTY", "FOB", "ITEM"]):
+        return "WORLDWIDE", "estructura"
+
+    # AQUA lists share a fingerprint; distinguish Consumer vs Laptops by content.
+    aqua_shape = (
+        _row_has(probes, ["PART NUMBER", "MANUFACTURER", "DESCRIPTION", "MIAMI", "NEW YORK"])
+        and "MOQ APPLIES TO PRODUCTS BELOW $100" in text
+    )
+    if aqua_shape:
+        # Consumer list contains a Category column and typically starts with desktop/consumer sections.
+        if _row_has(probes, ["PART NUMBER", "CATEGORY", "MANUFACTURER", "DESCRIPTION", "MIAMI", "NEW YORK"]):
+            return "AQUA CONSUMER", "estructura"
+        return "AQUA LAPTOPS", "estructura"
+
+    # ALL PLUS: simple Model/Description/Price list without stock fields.
+    if _row_has(probes, ["MODEL", "DESCRIPTION", "PRICE"]) and not _has_text(text, "QTY", "QUANTITY", "STOCK"):
+        return "ALL PLUS", "estructura"
+
+    # ALLBRANDS has a distinctive front matter/contact block rather than a normal header.
+    if _has_text(text, "FOR WHOLESALE PRICES CALL", "2112 NW 99TH AVENUE"):
+        return "ALLBRANDS", "estructura"
+
+    # If no fingerprint is decisive, keep current filename behavior as a safe fallback.
+    return _filename_fallback(filename), "nombre/backup"
 
 
 # ============================================================
@@ -778,10 +914,15 @@ PARSERS = {
 
 
 def parse_uploaded(uploaded) -> Tuple[pd.DataFrame, dict]:
-    provider=detect_provider(uploaded.name)
-    info={"Archivo":uploaded.name,"Proveedor":provider,"Productos":0,"Estado":"OK","Detalle":""}
     try:
         xls=excel_file(uploaded)
+        provider, detection_method = detect_provider(xls, uploaded.name)
+    except Exception as e:
+        info={"Archivo":uploaded.name,"Proveedor":"NO RECONOCIDO","Productos":0,"Estado":"❌ Error","Detalle":str(e)}
+        return empty_frame(),info
+
+    info={"Archivo":uploaded.name,"Proveedor":provider,"Productos":0,"Estado":"OK","Detalle":f"Detectado por {detection_method}."}
+    try:
         parser=PARSERS.get(provider)
         if parser is None:
             # Last-resort generic parser across sheets.
