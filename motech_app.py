@@ -465,7 +465,7 @@ def _filename_fallback(filename: str) -> str:
     if "INFLUENTIAL" in n: return "INFLUENTIAL"
     if "PRT" in n: return "PRT"
     if "SNK" in n: return "SNK"
-    if "SUNRISE" in n or re.search(r"\bSUN\b", n): return "SUNRISE"
+    if "SUNRISE" in n or "IGAMER" in n or re.search(r"\bSUN\b", n): return "SUNRISE"
     if "TECH SUPPLIER" in n: return "TECH SUPPLIER"
     if "203_TRADING" in n or "203 TRADING" in n: return "203_TRADING"
     if "TRADING" in n: return "UNLIMITED"
