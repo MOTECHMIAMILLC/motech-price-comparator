@@ -152,26 +152,54 @@ def synthetic_sku(desc: str, provider: str) -> str:
 
 def infer_sku_from_description(desc: str, provider: str) -> Tuple[str, str]:
     text = safe_text(desc).upper()
-    # Common manufacturer/model/MPN patterns. Avoid obvious capacity/spec tokens.
+    # Infer only model-like IDs. Generic specs such as 13-INCH or 2-IN-1 must
+    # never become a SKU because several different products would collapse.
     tokens = re.findall(r"\b[A-Z0-9][A-Z0-9#./_-]{4,30}\b", text)
-    bad = re.compile(r"^(?:\d+(?:GB|TB|HZ|W)|WIN(?:DOWS)?11|DDR\d|LPDDR\d|RTX|WUXGA|FHD|OLED|IPS)$")
+
+    def is_generic_token(t: str) -> bool:
+        n = re.sub(r"[^A-Z0-9]", "", t.upper())
+        if not n:
+            return True
+        generic_patterns = [
+            r"^\d+(?:GB|TB|MB|HZ|KHZ|MHZ|GHZ|W|WH)$",
+            r"^\d{3,4}X\d{3,4}$",
+            r"^\d+(?:\.\d+)?(?:INCH|IN)$",
+            r"^\d+IN\d+$",                 # 2-IN-1, 3-IN-1
+            r"^\d+CORE(?:CPU|GPU)?$",          # 10-core, 8-core
+            r"^[3579]\d{3}[A-Z]{1,2}$",         # Core Ultra 9-288V style CPU token
+            r"^(?:WIN|WINDOWS)\d+.*$",
+            r"^(?:DDR|LPDDR)\d.*$",
+            r"^(?:RTX|GTX|RX)\d{3,4}.*$",
+            r"^I[3579]\d{4,6}[A-Z]{0,3}$",
+            r"^(?:N|U)\d{3,4}$",
+            r"^\d{4,5}(?:H|HX|HS|U|G|GE)$",
+            r"^\d+(?:MONTH|MONTHS|YEAR|YEARS)$",
+        ]
+        return any(re.fullmatch(p, n) for p in generic_patterns)
+
     candidates = []
     for t in tokens:
         t = t.strip(".,;:()[]{}")
-        if bad.match(t):
+        if is_generic_token(t):
             continue
         if not re.search(r"[A-Z]", t) or not re.search(r"\d", t):
             continue
-        # score model-like tokens higher than specs
         score = 0
-        score += 3 if "-" in t or "/" in t or "#" in t else 0
-        score += min(len(t), 20) / 20
-        if re.search(r"\d{3,}", t): score += 1
-        if any(x in t for x in ["GB", "TB", "HZ", "GHZ", "MHZ"]): score -= 3
+        score += 4 if "-" in t or "/" in t or "#" in t else 0
+        score += min(t.count("-"), 3) * 2
+        score += min(len(t), 22) / 20
+        if re.search(r"\d{3,}", t):
+            score += 1
+        # Known reliable families of product identifiers.
+        if re.fullmatch(r"B0[A-Z0-9]{8}", re.sub(r"[^A-Z0-9]", "", t)):
+            score += 8
         candidates.append((score, t))
+
     if candidates:
         candidates.sort(reverse=True)
         return candidates[0][1], "INFERRED"
+
+    # A synthetic hash is safer than reusing a generic specification as SKU.
     return synthetic_sku(text, provider), "SYNTHETIC"
 
 
@@ -297,6 +325,250 @@ def finalize(rows: List[dict]) -> pd.DataFrame:
     df = df[~bonded_text.str.contains("BONDED", regex=False, na=False)]
     df = df[(df["SKU"] != "") & df["Precio"].notna() & df["Stock"].notna() & (df["Stock"] > 0)]
     return df[BASE_COLUMNS].drop_duplicates().reset_index(drop=True)
+
+
+
+# ============================================================
+# CROSS-VENDOR PRODUCT IDENTITY
+# ============================================================
+def _id_norm(value: str) -> str:
+    """Normalize a manufacturer identifier for conservative cross-vendor matching."""
+    return re.sub(r"[^A-Z0-9]", "", safe_text(value).upper())
+
+
+def _condition_bucket(row) -> str:
+    """Keep NEW / REFURB / USED / OPEN BOX inventories from being merged together."""
+    text = f"{safe_text(row.get('Condicion',''))} {safe_text(row.get('Descripcion',''))}".upper()
+    if any(k in text for k in [
+        "REFURBISHED", "REFURB", "RENEWED", "RECERTIFIED",
+        "RECONDITIONED", "RECONDITION", "CERTIFIED REFURBISHED",
+    ]):
+        return "REFURB"
+    if "OPEN BOX" in text or "OPENBOX" in text:
+        return "OPENBOX"
+    if re.search(r"\bUSED\b", text):
+        return "USED"
+    return "NEW"
+
+
+def _valid_identity_token(token: str) -> bool:
+    """
+    Reject specifications that look like model numbers but are not product IDs.
+    This intentionally favors precision over aggressive fuzzy matching.
+    """
+    t = _id_norm(token)
+    if not (6 <= len(t) <= 30):
+        return False
+
+    if t.isdigit():
+        return 8 <= len(t) <= 14
+
+    if not (re.search(r"[A-Z]", t) and re.search(r"\d", t)):
+        return False
+
+    generic_patterns = [
+        r"^\d{3,4}X\d{3,4}$",
+        r"^\d+(?:\.\d+)?(?:INCH|IN)$",
+        r"^\d+IN\d+$",
+        r"^\d+CORE(?:CPU|GPU)?$",
+        r"^[3579]\d{3}[A-Z]{1,2}$",
+        r"^\d+(?:GB|TB|MB|HZ|KHZ|MHZ|GHZ|W|WH)$",
+        r"^(?:DDR|LPDDR)\d.*$",
+        r"^(?:RTX|GTX|RX)\d{3,4}.*$",
+        r"^I[3579]\d{4,6}[A-Z]{0,3}$",
+        r"^(?:N|U)\d{3,4}$",
+        r"^\d{4,5}(?:H|HX|HS|U|G|GE)$",
+        r"^\d+(?:MONTH|MONTHS|YEAR|YEARS)$",
+        r"^(?:WIN|WINDOWS)\d+.*$",
+    ]
+    return not any(re.fullmatch(p, t) for p in generic_patterns)
+
+
+def _description_identity_tokens(desc: str) -> List[Tuple[str, str]]:
+    """
+    Return conservative model/MPN candidates found in a description.
+    They are not trusted by themselves; build_comparison_keys only uses one
+    when it also exists as a real SKU/MPN in another provider.
+    """
+    text = safe_text(desc).upper()
+    out: List[Tuple[str, str]] = []
+
+    for m in re.finditer(r"\bB0[A-Z0-9]{8}\b", text):
+        out.append(("ASIN", m.group(0)))
+
+    labelled = re.compile(
+        r"\b(?:MODEL|MPN|P/N|PN|PART(?:\s+NUMBER)?|VENDOR\s+PN|SKU|ASIN)"
+        r"\s*[:#-]?\s*([A-Z0-9][A-Z0-9._/#-]{4,30})"
+    )
+    for m in labelled.finditer(text):
+        out.append(("LABELED", m.group(1).strip(".,;:()[]{}")))
+
+    for token in re.findall(r"\b[A-Z0-9][A-Z0-9._/#-]{5,30}\b", text):
+        token = token.strip(".,;:()[]{}")
+        if _valid_identity_token(token):
+            out.append(("TOKEN", token))
+
+    seen = set()
+    clean = []
+    for kind, raw in out:
+        norm = _id_norm(raw)
+        if norm and norm not in seen and _valid_identity_token(norm):
+            seen.add(norm)
+            clean.append((kind, norm))
+    return clean
+
+
+def build_comparison_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build conservative cross-vendor product identities using an identifier graph.
+
+    This handles chains such as:
+        TECH internal SKU -> UPC -> PRT row -> ASIN -> H&Z/SNK SKU
+
+    Only exact identifier links are used. Generic specifications are rejected,
+    and condition (NEW / REFURB / USED / OPEN BOX) remains separate.
+    """
+    out = df.copy()
+
+    # Real supplier IDs that can act as anchors for description matching.
+    anchor_providers: Dict[str, set] = {}
+    for _, r in out.iterrows():
+        source = safe_text(r.get("SKU_Fuente", "")).upper()
+        if source == "SYNTHETIC":
+            continue
+        norm = _id_norm(r.get("SKU", ""))
+        if _valid_identity_token(norm):
+            anchor_providers.setdefault(norm, set()).add(safe_text(r.get("Proveedor", "")))
+
+    # Small union-find implementation for exact identifier links.
+    parent: Dict[str, str] = {}
+
+    def add(x: str):
+        if x not in parent:
+            parent[x] = x
+
+    def find(x: str) -> str:
+        add(x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    row_ids: Dict[int, List[Tuple[str, str]]] = {}
+
+    for idx, r in out.iterrows():
+        provider = safe_text(r.get("Proveedor", ""))
+        source = safe_text(r.get("SKU_Fuente", "")).upper()
+        ids: List[Tuple[str, str]] = []
+
+        own = _id_norm(r.get("SKU", ""))
+        if source != "SYNTHETIC" and _valid_identity_token(own):
+            ids.append((own, "SKU"))
+
+        # Internal supplier wrappers around a real GTIN/UPC.
+        raw_sku = safe_text(r.get("SKU", "")).upper()
+        for numeric_id in re.findall(r"(?<!\d)(\d{8,14})(?!\d)", raw_sku):
+            providers = anchor_providers.get(numeric_id, set())
+            if any(p and p != provider for p in providers):
+                ids.append((numeric_id, "EMBEDDED_GTIN"))
+
+        # A description token is only trusted if another supplier uses that
+        # exact token as a real SKU/MPN.
+        for kind, token in _description_identity_tokens(r.get("Descripcion", "")):
+            providers = anchor_providers.get(token, set())
+            if any(p and p != provider for p in providers):
+                ids.append((token, f"DESC_{kind}"))
+
+        # Deduplicate while preserving evidence kind.
+        dedup = {}
+        for token, kind in ids:
+            dedup.setdefault(token, kind)
+        ids = [(token, kind) for token, kind in dedup.items()]
+        row_ids[idx] = ids
+
+        for token, _ in ids:
+            add(token)
+        if len(ids) > 1:
+            first = ids[0][0]
+            for token, _ in ids[1:]:
+                union(first, token)
+
+    # Collect each connected component.
+    components: Dict[str, set] = {}
+    for token in list(parent):
+        components.setdefault(find(token), set()).add(token)
+
+    # Choose a stable, readable canonical identifier for each component.
+    canonical: Dict[str, str] = {}
+    for root, tokens in components.items():
+        scored = []
+        for token in tokens:
+            prov_count = len(anchor_providers.get(token, set()))
+            score = min(prov_count, 10) * 20
+            if re.fullmatch(r"B0[A-Z0-9]{8}", token):
+                score += 100
+            if token.isdigit():
+                # 12-14 digit GTIN/UPC/EAN values are strong global IDs.
+                score += 35 if 12 <= len(token) <= 14 else 10
+            else:
+                score += 12
+            score += min(len(token), 30) / 100
+            scored.append((score, token))
+        canonical[root] = max(scored)[1]
+
+    base_keys = []
+    reasons = []
+    for idx, r in out.iterrows():
+        ids = row_ids.get(idx, [])
+        if ids:
+            root = find(ids[0][0])
+            base = canonical[root]
+            own = _id_norm(r.get("SKU", ""))
+            if len(components.get(root, set())) > 1 or base != own:
+                reason = "LINKED_EXACT_ID"
+            else:
+                reason = "SKU"
+        else:
+            own = _id_norm(r.get("SKU", ""))
+            base = own or synthetic_sku(
+                safe_text(r.get("Descripcion", "")),
+                safe_text(r.get("Proveedor", "UNKNOWN"))
+            )
+            reason = "FALLBACK"
+
+        bucket = _condition_bucket(r)
+        base_keys.append(f"{base}::{bucket}")
+        reasons.append(reason)
+
+    out["Clave_Comparacion"] = pd.Series(base_keys, index=out.index, dtype="string")
+    out["Match_Motivo"] = pd.Series(reasons, index=out.index, dtype="string")
+    return out
+
+
+def _display_sku_for_group(g: pd.DataFrame, key: str) -> str:
+    base = key.split("::", 1)[0]
+    candidates = []
+    for _, r in g.iterrows():
+        sku = safe_text(r.get("SKU", "")).upper()
+        if _id_norm(sku) != base:
+            continue
+        score = 0
+        if safe_text(r.get("SKU_Fuente", "")).upper() == "FILE":
+            score += 20
+        if not _id_norm(sku).isdigit():
+            score += 10
+        if re.fullmatch(r"B0[A-Z0-9]{8}", _id_norm(sku)):
+            score += 10
+        score += min(len(sku), 30) / 100
+        candidates.append((score, sku))
+    if candidates:
+        return max(candidates)[1]
+    return base
 
 
 # ============================================================
@@ -996,39 +1268,63 @@ if not frames:
 
 df_all=pd.concat(frames,ignore_index=True)
 
+# Build a conservative product identity layer before category/spec enrichment.
+# This keeps every original supplier SKU, but lets equivalent products match
+# when another provider uses a model/MPN embedded in the description.
+df_all=build_comparison_keys(df_all)
+
 # Enrich after normalization so every provider uses the same logic.
 df_all["Categoria"]=df_all.apply(lambda r:clasificar_categoria(r["Descripcion"],r["SKU"],r.get("Condicion","")),axis=1)
 specs=df_all.apply(lambda r:extraer_especificaciones(f'{r["Descripcion"]} {r["SKU"]}'),axis=1)
 specs.columns=["Procesador","RAM","Disco_SSD","Pantalla"]
 df_all[["Procesador","RAM","Disco_SSD","Pantalla"]]=specs
 
-# KPIs compactos. Los cálculos son exactamente los mismos que antes.
+grouped=df_all.groupby("Clave_Comparacion",sort=False)
+desc_map=grouped["Descripcion"].apply(lambda x:max(x.astype(str),key=len)).to_dict()
+sku_display_map={
+    key:_display_sku_for_group(g,key)
+    for key,g in grouped
+}
+alias_map=grouped["SKU"].apply(
+    lambda x:" | ".join(dict.fromkeys([safe_text(v).upper() for v in x if safe_text(v)]))
+).to_dict()
+
+# KPIs compactos.
 rows_count = len(df_all)
 provider_count = df_all["Proveedor"].nunique()
-sku_count = df_all["SKU"].nunique()
+product_count = df_all["Clave_Comparacion"].nunique()
 stock_count = int((df_all["Stock"].fillna(0)>0).sum())
 
 st.markdown(f'''
 <div class="kpi-strip">
     <div class="kpi-box"><div class="kpi-value">{rows_count:,}</div><div class="kpi-label">Filas importadas</div></div>
     <div class="kpi-box"><div class="kpi-value">{provider_count:,}</div><div class="kpi-label">Proveedores</div></div>
-    <div class="kpi-box"><div class="kpi-value">{sku_count:,}</div><div class="kpi-label">SKUs únicos</div></div>
+    <div class="kpi-box"><div class="kpi-value">{product_count:,}</div><div class="kpi-label">Productos únicos</div></div>
     <div class="kpi-box"><div class="kpi-value">{stock_count:,}</div><div class="kpi-label">Con stock &gt; 0</div></div>
 </div>
 ''',unsafe_allow_html=True)
 
-# El detalle queda disponible, pero cerrado para ahorrar espacio vertical.
 with st.expander("📊 Detalle de importación",expanded=False):
     st.dataframe(log_df,use_container_width=True,hide_index=True)
 
-# Price matrix
-pivot_p=df_all.pivot_table(index="SKU",columns="Proveedor",values="Precio",aggfunc="min")
+# Price matrix keyed by the cross-vendor comparison key.
+pivot_p=df_all.pivot_table(
+    index="Clave_Comparacion",
+    columns="Proveedor",
+    values="Precio",
+    aggfunc="min"
+)
 provs=list(pivot_p.columns)
-desc_map=df_all.groupby("SKU")["Descripcion"].apply(lambda x:max(x.astype(str),key=len)).to_dict()
-pivot_p.insert(0,"Descripcion",pivot_p.index.map(desc_map))
-pivot_p.insert(1,"Categoria",pivot_p.index.map(df_all.groupby("SKU")["Categoria"].first().to_dict()))
+
+pivot_p.insert(0,"SKU",pivot_p.index.map(sku_display_map))
+pivot_p.insert(1,"SKUs_Alias",pivot_p.index.map(alias_map))
+pivot_p.insert(2,"Descripcion",pivot_p.index.map(desc_map))
+cat_map=grouped["Categoria"].first().to_dict()
+pivot_p.insert(3,"Categoria",pivot_p.index.map(cat_map))
+
 for c in ["Procesador","RAM","Disco_SSD","Pantalla"]:
-    pivot_p[c]=pivot_p.index.map(df_all.groupby("SKU")[c].first().to_dict())
+    cmap=grouped[c].first().to_dict()
+    pivot_p[c]=pivot_p.index.map(cmap)
 
 pivot_p["Min Precio"]=pivot_p[provs].min(axis=1)
 pivot_p["Max Precio"]=pivot_p[provs].max(axis=1)
@@ -1036,13 +1332,29 @@ pivot_p["Proveedor Menor Precio"]=pivot_p[provs].idxmin(axis=1)
 pivot_p["Ahorro Val"]=pivot_p["Max Precio"]-pivot_p["Min Precio"]
 pivot_p["Es Deal"]=(pivot_p[provs].notna().sum(axis=1)>=2)&(pivot_p["Ahorro Val"]>0)
 
-# Attach stock/location from the provider that has the lowest price.
+# Stock/location must come from the exact row that generated the winning price.
 stock_cheapest=[]; loc_cheapest=[]
-for sku,row in pivot_p.iterrows():
+for product_key,row in pivot_p.iterrows():
     winner=row["Proveedor Menor Precio"]
-    sub=df_all[(df_all["SKU"]==sku)&(df_all["Proveedor"]==winner)].sort_values("Stock",ascending=False,na_position="last")
-    stock_cheapest.append(sub.iloc[0]["Stock"] if not sub.empty else None)
-    loc_cheapest.append(sub.iloc[0]["Ubicacion"] if not sub.empty else "")
+    min_price=row["Min Precio"]
+    sub=df_all[
+        (df_all["Clave_Comparacion"]==product_key) &
+        (df_all["Proveedor"]==winner)
+    ].copy()
+    if not sub.empty:
+        exact=sub[(sub["Precio"]-float(min_price)).abs()<0.0001]
+        if not exact.empty:
+            sub=exact
+        sub=sub.sort_values("Stock",ascending=False,na_position="last")
+        stock_cheapest.append(sub.iloc[0]["Stock"])
+        loc=(
+            safe_text(sub.iloc[0].get("Ubicacion","")) or
+            safe_text(sub.iloc[0].get("ETA",""))
+        )
+        loc_cheapest.append(loc)
+    else:
+        stock_cheapest.append(None)
+        loc_cheapest.append("")
 pivot_p["Stock"]=stock_cheapest
 pivot_p["Ubicación / ETA"]=loc_cheapest
 
@@ -1062,7 +1374,8 @@ filtered=pivot_p.copy()
 if search_query:
     q=search_query.strip().upper()
     filtered=filtered[
-        filtered.index.astype(str).str.upper().str.contains(q,regex=False,na=False)|
+        filtered["SKU"].astype(str).str.upper().str.contains(q,regex=False,na=False)|
+        filtered["SKUs_Alias"].astype(str).str.upper().str.contains(q,regex=False,na=False)|
         filtered["Descripcion"].astype(str).str.upper().str.contains(q,regex=False,na=False)
     ]
 if f_cpu: filtered=filtered[filtered["Procesador"].isin(f_cpu)]
@@ -1080,7 +1393,7 @@ with st.expander(f"🔥 Ofertas Destacadas & Oportunidades ({len(deals_df)})",ex
         for idx,(sku,row) in enumerate(deals_df.head(6).iterrows()):
             with cols[idx%3]:
                 desc=html.escape(str(row["Descripcion"]))
-                sku_safe=html.escape(str(sku))
+                sku_safe=html.escape(str(row["SKU"]))
                 prov_safe=html.escape(str(row["Proveedor Menor Precio"]))
                 st.markdown(f'''<div class="card-deal"><span class="badge-savings">Diferencia: ${row['Ahorro Val']:,.2f}</span>
                 <div class="card-title">{desc[:80]}...</div><span class="badge-meta">SKU: {sku_safe}</span>
@@ -1116,7 +1429,7 @@ for tab,cat in zip(tabs,tab_list):
                 p for p in provs
                 if p in d.columns and d[p].notna().any()
             ]
-            cols_display=["Descripcion"]+provs_visibles+["Stock","Ubicación / ETA"]
+            cols_display=["SKU","Descripcion"]+provs_visibles+["Stock","Ubicación / ETA"]
 
             fmt={p:"${:,.2f}" for p in provs_visibles}
             fmt.update({"Stock":"{:,.0f}"})
@@ -1125,12 +1438,24 @@ for tab,cat in zip(tabs,tab_list):
                 .style
                 .apply(highlight_min_price,axis=1)
                 .format(fmt,na_rep="—"),
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True
             )
+
+# Diagnostics: show cross-vendor matches that did not rely only on the supplier SKU.
+matched_by_desc=df_all[df_all["Match_Motivo"].astype(str).eq("LINKED_EXACT_ID")]
+if not matched_by_desc.empty:
+    with st.expander(f"🔗 Coincidencias de producto entre proveedores ({len(matched_by_desc)})"):
+        st.caption("Estas filas se vincularon mediante identificadores exactos compartidos entre proveedores (SKU, MPN, ASIN, UPC/GTIN).")
+        st.dataframe(
+            matched_by_desc[["Proveedor","SKU","Clave_Comparacion","Match_Motivo","Descripcion","Precio","Stock"]],
+            use_container_width=True,
+            hide_index=True
+        )
 
 # Diagnostics: inferred/synthetic SKUs cannot always match across vendors.
 inferred=df_all[df_all["SKU_Fuente"].isin(["INFERRED","SYNTHETIC"])]
 if not inferred.empty:
     with st.expander(f"🧩 SKUs inferidos automáticamente ({len(inferred)})"):
         st.caption("Estos proveedores no siempre entregan un SKU/MPN explícito. Revisa estos productos si necesitas comparación exacta entre proveedores.")
-        st.dataframe(inferred[["Proveedor","SKU","SKU_Fuente","Descripcion","Precio","Stock"]],use_container_width=True,hide_index=True)
+        st.dataframe(inferred[["Proveedor","SKU","SKU_Fuente","Clave_Comparacion","Descripcion","Precio","Stock"]],use_container_width=True,hide_index=True)
