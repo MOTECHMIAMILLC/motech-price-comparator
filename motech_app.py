@@ -578,12 +578,21 @@ def _display_sku_for_group(g: pd.DataFrame, key: str) -> str:
 def clasificar_categoria(desc, sku, condition=""):
     text = f"{safe_text(desc)} {safe_text(sku)} {safe_text(condition)}".upper()
 
+    # Normalize trademark / punctuation variants that frequently appear in supplier descriptions.
+    text_norm = (
+        text.replace("™", " ")
+            .replace("®", " ")
+            .replace("–", "-")
+            .replace("—", "-")
+    )
+    text_norm = re.sub(r"\s+", " ", text_norm).strip()
+
     # Refurbished has absolute priority regardless of product type.
     refurb_keys = [
         "REFURBISHED", "REFURB", "RENEWED", "RECERTIFIED",
         "RECONDITIONED", "RECONDITION", "CERTIFIED REFURBISHED",
     ]
-    if any(k in text for k in refurb_keys):
+    if any(k in text_norm for k in refurb_keys):
         return "♻️ REFURBISHED"
 
     gaming_keys = [
@@ -594,42 +603,56 @@ def clasificar_categoria(desc, sku, condition=""):
         "GAMING LAPTOP", "GAMING DESKTOP", "GAMING PC", "GAMING HEADSET",
         "GAMING MOUSE", "GAMING KEYBOARD", "LOGITECH G", "HYPERX", "ASTRO",
     ]
-    if any(k in text for k in gaming_keys):
+    if any(k in text_norm for k in gaming_keys):
         return "🎮 Gaming"
 
+    # Explicit desktop families have priority over generic specification inference.
     desktop_keys = [
         "DESKTOP", "ALL IN ONE", "ALL-IN-ONE", " AIO ", "THINKCENTRE", "THINKCENTER",
-        "OPTIPLEX", "PRODESK", "ELITEDESK", "THINKSTATION", "MINI PC", "MINI DESKTOP",
-        "MICRO PC", "SFF", "SMALL FORM FACTOR", "TOWER", "WORKSTATION", "SERVER", "NUC",
-        "PRECISION TOWER", "PRECISION WORKSTATION", "HP Z2", "HP Z4", "HP Z6", "HP Z8",
+        "IDEACENTRE", "IDEACENTER", "OPTIPLEX", "PRODESK", "ELITEDESK", "THINKSTATION",
+        "MINI PC", "MINI DESKTOP", "MICRO PC", "SFF", "SMALL FORM FACTOR", "TOWER",
+        "WORKSTATION", "SERVER", "NUC", "PRECISION TOWER", "PRECISION WORKSTATION",
+        "HP Z2", "HP Z4", "HP Z6", "HP Z8",
+        "IMAC", "MAC MINI", "MAC STUDIO", "MAC PRO",
     ]
-    if any(k in text for k in desktop_keys):
+    if any(k in text_norm for k in desktop_keys):
         return "🖥️ Desktops & PC"
 
+    # Explicit laptop families / commercial notebook lines.
     laptop_keys = [
         "MACBOOK", "LAPTOP", "NOTEBOOK", "CHROMEBOOK", "ASPIRE", "VIVOBOOK", "ZENBOOK",
-        "EXPERTBOOK", "IDEAPAD", "THINKPAD", "LATITUDE", "INSPIRON", "VOSTRO",
+        "EXPERTBOOK", "IDEAPAD", "THINKPAD", "THINKBOOK", "LATITUDE", "INSPIRON", "VOSTRO",
         "PROBOOK", "ELITEBOOK", "ZBOOK", "PAVILION", "ENVY", "SPECTRE", "OMNIBOOK",
         "SURFACE LAPTOP", "LG GRAM", "YOGA", "SWIFT", "TRAVELMATE", "DELL PRO ",
+        "HP 250 G", "HP 255 G", "HP 245 G", "HP 240 G",
     ]
-    if any(k in text for k in laptop_keys):
+    if any(k in text_norm for k in laptop_keys):
         return "💻 Laptops"
+
+    # Amazon Fire tablets must be classified as tablets before generic Amazon multimedia rules.
+    fire_tablet_keys = [
+        "FIRE HD 7", "FIRE HD 8", "FIRE HD 10", "FIRE HD", "FIRE 7", "FIRE TABLET",
+    ]
+    if any(k in text_norm for k in fire_tablet_keys):
+        return "📱 Tablets"
 
     # Multimedia is intentionally separate from generic accessories.
     multimedia_keys = [
         "SPEAKER", "SPEAKERS", "BLUETOOTH SPEAKER", "SOUNDBAR", "SOUND BAR",
         "HEADPHONE", "HEADPHONES", "EARBUD", "EARBUDS", "AIRPODS", "BEATS",
-        "WIRELESS EARBUD", "TRUE WIRELESS", "TWS", "ECHO DOT", "ECHO SHOW", "ALEXA",
+        "WIRELESS EARBUD", "TRUE WIRELESS", "TWS",
+        "AMAZON ECHO", "ECHO DOT", "ECHO SHOW", "ECHO POP", "ECHO SPOT", "ECHO STUDIO", "ALEXA",
+        "KINDLE", "PAPERWHITE", "KINDLE SCRIBE",
         "FIRE TV", "FIRE STICK", "TV STICK", "CHROMECAST", "ROKU", "APPLE TV",
         "STREAMING DEVICE", "MEDIA PLAYER", "SMART TV BOX",
     ]
-    if any(k in text for k in multimedia_keys):
+    if any(k in text_norm for k in multimedia_keys):
         return "🎵 Multimedia"
 
-    if any(k in text for k in ["IPAD", "TABLET", " TAB ", "GALAXY TAB", "SURFACE PRO"]):
+    if any(k in text_norm for k in ["IPAD", "TABLET", " TAB ", "GALAXY TAB", "SURFACE PRO"]):
         return "📱 Tablets"
 
-    if any(k in text for k in ["MONITOR", "DISPLAY", "144HZ", "165HZ", "180HZ", "240HZ"]):
+    if any(k in text_norm for k in ["MONITOR", "DISPLAY", "144HZ", "165HZ", "180HZ", "240HZ"]):
         return "🖥️ Monitores"
 
     accessory_keys = [
@@ -637,14 +660,66 @@ def clasificar_categoria(desc, sku, condition=""):
         "DOCKING", "ADAPTER", "ADAPTOR", "CHARGER", "POWER SUPPLY", "WEBCAM",
         "USB HUB", "HUB ", "BACKPACK", "SLEEVE",
     ]
-    if any(k in text for k in accessory_keys):
+    if any(k in text_norm for k in accessory_keys):
         return "🎧 Accesorios"
 
-    # Specification fallback for laptop descriptions without a known family name.
-    has_cpu = bool(re.search(r"\b(?:CORE\s+(?:ULTRA\s+)?[3579]|I[3579][-\s]|RYZEN(?:\s+AI)?\s+[3579]|SNAPDRAGON\s+X|CELERON|PENTIUM)\b", text))
-    has_screen = bool(re.search(r'\b1[1-7](?:\.\d)?\s*(?:INCH|IN|"|″)?\b', text))
-    has_memory = bool(re.search(r"\b(?:4|8|12|16|24|32|48|64)\s*GB\b", text))
-    if has_cpu and has_screen and has_memory:
+    # ------------------------------------------------------------------
+    # Laptop fallback for supplier descriptions that do NOT say "Laptop".
+    # Typical real examples:
+    #   NEW HP 15, Intel N200, 4GB, 128GB UFS, 15.6" ...
+    #   Asus F1504..., Intel Core™ 7 150U, 8GB, 512GB, 15.6" ...
+    # We require a laptop-sized screen + memory/storage + a mobile/PC CPU signal,
+    # which avoids classifying unrelated electronics merely because they contain GB values.
+    # ------------------------------------------------------------------
+    cpu_patterns = [
+        r"\bCORE\s+(?:ULTRA\s+)?[3579]\b",          # Core 7 / Core Ultra 7
+        r"\bCORE\s*I[3579]\b",
+        r"\bI[3579][\s-]?\d{3,6}[A-Z]{0,3}\b",
+        r"\bRYZEN(?:\s+AI)?\s+[3579]\b",
+        r"\bRYZEN\s+\d{4,5}[A-Z]{0,3}\b",
+        r"\bINTEL\s+(?:PROCESSOR\s+)?N(?:95|97|100|150|200|250|305|355|4000|4020|4100|4120|4500|5000|5030|5100)\b",
+        r"\bN(?:95|97|100|150|200|250|305|355|4000|4020|4100|4120|4500|5000|5030|5100)\b",
+        r"\bCELERON\b|\bPENTIUM\b|\bATHLON\b",
+        r"\bSNAPDRAGON\s+X\b",
+        r"\bAPPLE\s+M[1-5]\b|\bM[1-5]\s+CHIP\b",
+    ]
+    has_cpu = any(re.search(pat, text_norm) for pat in cpu_patterns)
+
+    # Laptop screen range: 10–18 inches. Decimal is optional.
+    has_laptop_screen = bool(re.search(
+        r'\b(?:10|11|12|13|14|15|16|17|18)(?:\.\d)?\s*(?:INCH|INCHES|IN|"|″)(?=\s|[),;/]|$)',
+        text_norm,
+    ))
+
+    has_memory = bool(re.search(r"\b(?:4|6|8|12|16|18|24|32|36|48|64)\s*GB\b", text_norm))
+    has_storage = bool(re.search(
+        r"\b(?:64|128|256|512)\s*GB\b|\b(?:1|2|4)\s*TB\b|\b(?:SSD|UFS|EMMC)\b",
+        text_norm,
+    ))
+
+    # Strong family/model hints used by vendors that omit the word laptop.
+    laptop_model_hint = bool(re.search(
+        r"\b(?:HP\s+(?:14|15|17)(?:-|\s)|ASUS\s+[A-Z]\d{3,5}|ACER\s+[A-Z]{1,4}\d{2,5}|"
+        r"LENOVO\s+(?:V\d{2}|E\d{2}|T\d{2}|X\d{2})|DELL\s+(?:PRO\s+)?\d{3,4})\b",
+        text_norm,
+    ))
+
+    # Scored fallback: use multiple independent laptop signals rather than a single word.
+    laptop_score = 0
+    if has_cpu:
+        laptop_score += 2
+    if has_memory:
+        laptop_score += 1
+    if has_storage:
+        laptop_score += 1
+    if has_laptop_screen:
+        laptop_score += 2
+    if laptop_model_hint:
+        laptop_score += 2
+    if any(k in text_norm for k in ["WINDOWS 11", "WIN 11", "W11", "FHD", "WUXGA", "IPS", "OLED"]):
+        laptop_score += 1
+
+    if laptop_score >= 5 and has_laptop_screen and (has_cpu or laptop_model_hint):
         return "💻 Laptops"
 
     return "📦 Otros / Varios"
@@ -669,6 +744,8 @@ def extraer_especificaciones(text):
         (r"\bAPPLE\s*M3\b|\bM3 CHIP\b", "Apple M3"),
         (r"\bAPPLE\s*M2\b|\bM2 CHIP\b", "Apple M2"),
         (r"\bAPPLE\s*M1\b|\bM1 CHIP\b", "Apple M1"),
+        (r"\bN(?:95|97|100|150|200|250|305|355|4000|4020|4100|4120|4500|5000|5030|5100)\b", "Intel Processor N-series"),
+        (r"\bCELERON\b|\bPENTIUM\b", "Intel Celeron/Pentium"),
     ]
     for pat, label in cpu_patterns:
         if re.search(pat, t): cpu = label; break
