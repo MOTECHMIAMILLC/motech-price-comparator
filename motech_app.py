@@ -686,8 +686,11 @@ def clasificar_categoria(desc, sku, condition=""):
     has_cpu = any(re.search(pat, text_norm) for pat in cpu_patterns)
 
     # Laptop screen range: 10–18 inches. Decimal is optional.
+    # Supplier descriptions often write the resolution immediately after the screen size,
+    # e.g. 15.6"(1366x768) or 14”(1920x1200). Accept straight/curly quote marks
+    # and an opening parenthesis right after the screen size.
     has_laptop_screen = bool(re.search(
-        r'\b(?:10|11|12|13|14|15|16|17|18)(?:\.\d)?\s*(?:INCH|INCHES|IN|"|″)(?=\s|[),;/]|$)',
+        r'\b(?:10|11|12|13|14|15|16|17|18)(?:\.\d)?\s*(?:INCH|INCHES|IN|"|″|”|“)(?=\s|[(),;/]|$)',
         text_norm,
     ))
 
