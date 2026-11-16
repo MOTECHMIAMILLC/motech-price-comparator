@@ -1028,6 +1028,48 @@ def parse_sunrise(xls):
     return finalize(rows)
 
 
+def diagnose_sunrise(xls) -> dict:
+    """Return transparent import diagnostics for SUNRISE/iGamer without changing parsing rules."""
+    try:
+        sheet = next((s for s in xls.sheet_names if "PRICE" in s.upper()), xls.sheet_names[0])
+        raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+    except Exception:
+        return {}
+
+    source_rows = []
+    for idx, r in raw.iterrows():
+        vals = r.tolist()
+        if len(vals) < 5:
+            continue
+        qty = clean_qty(vals[0])
+        desc = safe_text(vals[2] if len(vals) > 2 else "")
+        status = safe_text(vals[3] if len(vals) > 3 else "").upper()
+        cash = clean_price(vals[4] if len(vals) > 4 else None)
+        if not desc or cash is None or qty is None:
+            continue
+        source_rows.append({
+            "row": int(idx),
+            "qty": qty,
+            "desc": desc,
+            "status": status,
+            "cash": cash,
+        })
+
+    stock_rows = [x for x in source_rows if "STOCK" in x["status"]]
+    transit_rows = [x for x in source_rows if "TRANSIT" in x["status"]]
+    # Exact duplicate source rows (same description/qty/price/status) are intentionally deduplicated downstream.
+    stock_signatures = [(x["desc"].upper(), x["qty"], x["cash"], x["status"]) for x in stock_rows]
+    unique_stock = len(set(stock_signatures))
+    duplicate_stock = max(len(stock_rows) - unique_stock, 0)
+
+    return {
+        "Filas fuente": len(source_rows),
+        "Stock fuente": len(stock_rows),
+        "Tránsito fuente": len(transit_rows),
+        "Duplicadas stock": duplicate_stock,
+    }
+
+
 def parse_tech(xls):
     # Consolidate duplicate item/location rows into one row per SKU at same price.
     df=parse_simple_table(xls,"TECH SUPPLIER",xls.sheet_names[0],hdr=0,
@@ -1193,8 +1235,22 @@ def parse_uploaded(uploaded) -> Tuple[pd.DataFrame, dict]:
         info={"Archivo":uploaded.name,"Proveedor":"NO RECONOCIDO","Productos":0,"Estado":"❌ Error","Detalle":str(e)}
         return empty_frame(),info
 
-    info={"Archivo":uploaded.name,"Proveedor":provider,"Productos":0,"Estado":"OK","Detalle":f"Detectado por {detection_method}."}
+    info={
+        "Archivo":uploaded.name,
+        "Proveedor":provider,
+        "Productos":0,
+        "Filas fuente":"",
+        "Stock fuente":"",
+        "Tránsito fuente":"",
+        "Duplicadas stock":"",
+        "Estado":"OK",
+        "Detalle":f"Detectado por {detection_method}."
+    }
     try:
+        if provider == "SUNRISE":
+            diag = diagnose_sunrise(xls)
+            for k, v in diag.items():
+                info[k] = v
         parser=PARSERS.get(provider)
         if parser is None:
             # Last-resort generic parser across sheets.
@@ -1208,7 +1264,7 @@ def parse_uploaded(uploaded) -> Tuple[pd.DataFrame, dict]:
         info["Productos"]=len(df)
         if df.empty:
             info["Estado"]="⚠️ Sin datos"
-            info["Detalle"]="No se detectaron filas válidas con SKU/Descripción y precio."
+            info["Detalle"]="No quedaron productos válidos después de aplicar precio, stock > 0 y exclusiones comerciales."
         return df,info
     except Exception as e:
         info["Estado"]="❌ Error"
@@ -1306,6 +1362,12 @@ st.markdown(f'''
 
 with st.expander("📊 Detalle de importación",expanded=False):
     st.dataframe(log_df,use_container_width=True,hide_index=True)
+    if "SUNRISE" in log_df.get("Proveedor", pd.Series(dtype=str)).astype(str).tolist():
+        st.caption(
+            "SUNRISE / iGamer: 'Stock fuente' cuenta filas marcadas STOCK en el Excel; "
+            "'Tránsito fuente' no entra al comparador; 'Duplicadas stock' son filas repetidas que se consolidan. "
+            "'Productos' es el número final de productos únicos válidos importados."
+        )
 
 # Price matrix keyed by the cross-vendor comparison key.
 pivot_p=df_all.pivot_table(
