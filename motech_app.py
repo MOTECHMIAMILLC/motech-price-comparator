@@ -51,6 +51,7 @@ PROVIDER_CODES = {
     "UNLIMITED": "UNL",
     "203_TRADING": "203",
     "WORLDWIDE": "WWD",
+    "CRAVING": "CRV",
 }
 
 # ============================================================
@@ -753,6 +754,14 @@ def detect_provider(xls, filename: str) -> Tuple[str, str]:
     sheets, probes, text = _probe_workbook(xls)
     sheet_set = set(sheets)
 
+    # CRAVING — workbook split by product families with a stable inventory header.
+    craving_core_sheets = {"HP", "LENOVO", "DELL-SAMSUNG", "ACER-ASUS"}
+    if (
+        len(craving_core_sheets.intersection(sheet_set)) >= 3
+        and _row_has(probes, ["SKU", "UPC", "PRODUCTNAME", "QTY", "OFFER"])
+    ):
+        return "CRAVING", "estructura"
+
     # H&Z — very stable workbook structure, independent of filename.
     if (
         "H&Z OFFERS" in sheet_set
@@ -1168,6 +1177,84 @@ def parse_203_trading(xls):
     return finalize(rows)
 
 
+def parse_craving(xls):
+    """Parse Craving inventory sheets.
+
+    Craving repeats the same inventory schema across product-family tabs.
+    Summary tabs (Just Launched / Price Dropped) are intentionally skipped
+    because their products are already present in the primary inventory tabs.
+    """
+    skip_sheets = {"JUST LAUNCHED", "PRICE DROPPED"}
+    parts = []
+
+    for sheet in xls.sheet_names:
+        if sheet.strip().upper() in skip_sheets:
+            continue
+        try:
+            df = pd.read_excel(xls, sheet_name=sheet, header=0)
+            if df.empty:
+                continue
+
+            c_sku = first_col(df, ["SKU"])
+            c_upc = first_col(df, ["UPC"])
+            c_desc = first_col(df, ["PRODUCTNAME", "PRODUCT NAME", "DESCRIPTION"])
+            c_qty = first_col(df, ["QTY", "QUANTITY", "STOCK"])
+            c_price = first_col(df, ["OFFER", "PRICE", "COST"])
+
+            # Only inventory-shaped sheets belong in the parser.
+            if c_desc is None or c_qty is None or c_price is None:
+                continue
+
+            rows = []
+            for _, r in df.iterrows():
+                desc = safe_text(r[c_desc])
+                sku = safe_text(r[c_sku]) if c_sku else ""
+                upc = safe_text(r[c_upc]) if c_upc else ""
+
+                if not desc:
+                    continue
+
+                # Craving marks refurbished items with an -R suffix and/or
+                # wording in the product name. Preserve that condition so
+                # NEW and REFURB inventories never merge.
+                condition = ""
+                combined = f"{sku} {desc}".upper()
+                if (
+                    re.search(r"(?:^|[-_/])R(?:$|[-_/])", sku.upper())
+                    or "REFURB" in combined
+                    or "RENEWED" in combined
+                    or "RECERTIFIED" in combined
+                ):
+                    condition = "REFURBISHED"
+
+                row = make_row(
+                    "CRAVING",
+                    sku,
+                    desc,
+                    r[c_price],
+                    stock=r[c_qty],
+                    condition=condition,
+                    sku_source="FILE" if sku else "INFERRED",
+                )
+                if row:
+                    # Keep UPC available to the cross-vendor identity engine
+                    # without replacing Craving's manufacturer SKU.
+                    if upc:
+                        row["Descripcion"] = f"{row['Descripcion']} [UPC {upc}]"
+                    rows.append(row)
+
+            if rows:
+                parts.append(finalize(rows))
+        except Exception:
+            continue
+
+    if not parts:
+        return empty_frame()
+
+    result = pd.concat(parts, ignore_index=True)
+    return result.drop_duplicates().reset_index(drop=True)
+
+
 def parse_worldwide(xls):
     df=pd.read_excel(xls,sheet_name=xls.sheet_names[0],header=0)
     rows=[]
@@ -1224,6 +1311,7 @@ PARSERS = {
     "UNLIMITED": parse_unlimited,
     "203_TRADING": parse_203_trading,
     "WORLDWIDE": parse_worldwide,
+    "CRAVING": parse_craving,
 }
 
 
