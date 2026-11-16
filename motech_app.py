@@ -655,13 +655,15 @@ def clasificar_categoria(desc, sku, condition=""):
     if any(k in text_norm for k in ["MONITOR", "DISPLAY", "144HZ", "165HZ", "180HZ", "240HZ"]):
         return "🖥️ Monitores"
 
+    # Generic accessories are intentionally grouped into Otros / Varios.
+    # Multimedia devices (audio/streaming/Kindle/Echo) are handled above.
     accessory_keys = [
         "MOUSE", "KEYBOARD", "CABLE", "PENCIL", "STYLUS", "CASE", "COVER", "DOCK",
         "DOCKING", "ADAPTER", "ADAPTOR", "CHARGER", "POWER SUPPLY", "WEBCAM",
         "USB HUB", "HUB ", "BACKPACK", "SLEEVE",
     ]
     if any(k in text_norm for k in accessory_keys):
-        return "🎧 Accesorios"
+        return "📦 Otros / Varios"
 
     # ------------------------------------------------------------------
     # Laptop fallback for supplier descriptions that do NOT say "Laptop".
@@ -1335,6 +1337,57 @@ def parse_craving(xls):
     return result.drop_duplicates().reset_index(drop=True)
 
 
+def extraer_marca(desc, sku=""):
+    """Detecta la marca de forma conservadora a partir de descripción y SKU."""
+    text = normalize_text(f"{desc} {sku}")
+
+    brand_patterns = [
+        ("HP", [r"\bHP\b", r"\bHEWLETT[ -]PACKARD\b"]),
+        ("Lenovo", [r"\bLENOVO\b", r"\bTHINKPAD\b", r"\bTHINKBOOK\b", r"\bIDEAPAD\b", r"\bIDEACENTRE\b", r"\bTHINKCENTRE\b", r"\bLEGION\b", r"\bYOGA\b", r"\bLOQ\b"]),
+        ("Dell", [r"\bDELL\b", r"\bLATITUDE\b", r"\bINSPIRON\b", r"\bVOSTRO\b", r"\bOPTIPLEX\b", r"\bALIENWARE\b"]),
+        ("Apple", [r"\bAPPLE\b", r"\bMACBOOK\b", r"\bIMAC\b", r"\bMAC MINI\b", r"\bMAC STUDIO\b", r"\bIPAD\b", r"\bAIRPODS\b"]),
+        ("ASUS", [r"\bASUS\b", r"\bVIVOBOOK\b", r"\bZENBOOK\b", r"\bROG\b", r"\bTUF\b"]),
+        ("Acer", [r"\bACER\b", r"\bASPIRE\b", r"\bPREDATOR\b", r"\bNITRO\b"]),
+        ("Microsoft", [r"\bMICROSOFT\b", r"\bSURFACE\b", r"\bXBOX\b"]),
+        ("Samsung", [r"\bSAMSUNG\b", r"\bGALAXY\b"]),
+        ("LG", [r"\bLG\b", r"\bGRAM\b"]),
+        ("MSI", [r"\bMSI\b", r"\bKATANA\b", r"\bCYBORG\b", r"\bRAIDER\b", r"\bSTEALTH\b"]),
+        ("Amazon", [r"\bAMAZON\b", r"\bKINDLE\b", r"\bECHO\b", r"\bFIRE TV\b", r"\bFIRE HD\b"]),
+        ("Google", [r"\bGOOGLE\b", r"\bPIXEL\b", r"\bCHROMECAST\b"]),
+        ("Sony", [r"\bSONY\b", r"\bPLAYSTATION\b", r"\bPS5\b", r"\bPS4\b"]),
+        ("Nintendo", [r"\bNINTENDO\b", r"\bSWITCH\b"]),
+        ("Meta", [r"\bMETA QUEST\b", r"\bOCULUS\b"]),
+        ("Razer", [r"\bRAZER\b"]),
+        ("Logitech", [r"\bLOGITECH\b"]),
+        ("HyperX", [r"\bHYPERX\b"]),
+        ("Corsair", [r"\bCORSAIR\b"]),
+        ("JBL", [r"\bJBL\b"]),
+        ("Bose", [r"\bBOSE\b"]),
+        ("Beats", [r"\bBEATS\b"]),
+        ("Philips", [r"\bPHILIPS\b"]),
+        ("Anker", [r"\bANKER\b", r"\bSOUNDCORE\b"]),
+        ("Belkin", [r"\bBELKIN\b"]),
+        ("TP-Link", [r"\bTP[ -]?LINK\b"]),
+        ("Netgear", [r"\bNETGEAR\b"]),
+        ("Kingston", [r"\bKINGSTON\b"]),
+        ("Crucial", [r"\bCRUCIAL\b"]),
+        ("SanDisk", [r"\bSANDISK\b"]),
+        ("Western Digital", [r"\bWESTERN DIGITAL\b", r"\bWD BLACK\b", r"\bWD BLUE\b"]),
+        ("Seagate", [r"\bSEAGATE\b"]),
+        ("Intel", [r"\bINTEL\b"]),
+        ("AMD", [r"\bAMD\b"]),
+        ("Canon", [r"\bCANON\b"]),
+        ("Epson", [r"\bEPSON\b"]),
+        ("Brother", [r"\bBROTHER\b"]),
+        ("Roku", [r"\bROKU\b"]),
+    ]
+
+    for brand, patterns in brand_patterns:
+        if any(re.search(pattern, text) for pattern in patterns):
+            return brand
+    return "Otro / No especificado"
+
+
 def parse_worldwide(xls):
     df=pd.read_excel(xls,sheet_name=xls.sheet_names[0],header=0)
     rows=[]
@@ -1499,6 +1552,7 @@ df_all=build_comparison_keys(df_all)
 
 # Enrich after normalization so every provider uses the same logic.
 df_all["Categoria"]=df_all.apply(lambda r:clasificar_categoria(r["Descripcion"],r["SKU"],r.get("Condicion","")),axis=1)
+df_all["Marca"]=df_all.apply(lambda r:extraer_marca(r["Descripcion"],r["SKU"]),axis=1)
 specs=df_all.apply(lambda r:extraer_especificaciones(f'{r["Descripcion"]} {r["SKU"]}'),axis=1)
 specs.columns=["Procesador","RAM","Disco_SSD","Pantalla"]
 df_all[["Procesador","RAM","Disco_SSD","Pantalla"]]=specs
@@ -1552,7 +1606,7 @@ pivot_p.insert(2,"Descripcion",pivot_p.index.map(desc_map))
 cat_map=grouped["Categoria"].first().to_dict()
 pivot_p.insert(3,"Categoria",pivot_p.index.map(cat_map))
 
-for c in ["Procesador","RAM","Disco_SSD","Pantalla"]:
+for c in ["Marca","Procesador","RAM","Disco_SSD","Pantalla"]:
     cmap=grouped[c].first().to_dict()
     pivot_p[c]=pivot_p.index.map(cmap)
 
@@ -1595,6 +1649,7 @@ search_query=st.sidebar.text_input("Buscar por SKU o Descripción:",placeholder=
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 💻 Filtros Técnicos")
 def opts(col): return sorted([x for x in pivot_p[col].dropna().unique().tolist() if x!="Otro / No especificado"])
+f_brand=st.sidebar.multiselect("Marca:",opts("Marca"))
 f_cpu=st.sidebar.multiselect("Procesador:",opts("Procesador"))
 f_ram=st.sidebar.multiselect("Memoria RAM:",opts("RAM"))
 f_ssd=st.sidebar.multiselect("Disco / SSD:",opts("Disco_SSD"))
@@ -1608,6 +1663,7 @@ if search_query:
         filtered["SKUs_Alias"].astype(str).str.upper().str.contains(q,regex=False,na=False)|
         filtered["Descripcion"].astype(str).str.upper().str.contains(q,regex=False,na=False)
     ]
+if f_brand: filtered=filtered[filtered["Marca"].isin(f_brand)]
 if f_cpu: filtered=filtered[filtered["Procesador"].isin(f_cpu)]
 if f_ram: filtered=filtered[filtered["RAM"].isin(f_ram)]
 if f_ssd: filtered=filtered[filtered["Disco_SSD"].isin(f_ssd)]
