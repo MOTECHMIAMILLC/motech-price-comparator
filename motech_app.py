@@ -1339,7 +1339,9 @@ def parse_craving(xls):
 
 def extraer_marca(desc, sku=""):
     """Detecta la marca de forma conservadora a partir de descripción y SKU."""
-    text = normalize_text(f"{desc} {sku}")
+    # Normalización local para no depender de funciones auxiliares externas.
+    text = f"{desc} {sku}".upper()
+    text = re.sub(r"\s+", " ", text).strip()
 
     brand_patterns = [
         ("HP", [r"\bHP\b", r"\bHEWLETT[ -]PACKARD\b"]),
